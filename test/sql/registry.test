@@ -1,0 +1,197 @@
+# name: test/sql/registry.test
+# description: Download plugins from a mock GitHub release host and a mock CloudQuery Hub (sha256-verified cache, API key secret)
+# group: [cloudquery]
+
+require vgi
+
+require-env CLOUDQUERY_WORKER
+
+require-env CLOUDQUERY_MOCK_REGISTRY
+
+require-env CLOUDQUERY_FIXTURE_SHA256
+
+require-env CLOUDQUERY_NOSUM_SHA256
+
+require-env CLOUDQUERY_CACHE_DIR
+
+require-env CLOUDQUERY_FIXTURE_PLUGIN
+
+# --------------------------------------------------------------- GitHub releases
+
+# The cloudquery monorepo layout (plugins-source-<name>-<version>) and the
+# community layout (<team>/cq-source-<name>), each checked against checksums.txt.
+statement ok
+ATTACH 'cloudquery' AS gh (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}',
+    plugins 'mono=github:cloudquery/fixture@v1.0.0, community=github:query-farm/fixture@v1.0.0',
+    github_url '{CLOUDQUERY_MOCK_REGISTRY}', cache_dir '{CLOUDQUERY_CACHE_DIR}');
+
+query TTTT
+SELECT schema_name, ref, registry, plugin_version FROM gh.main.plugin ORDER BY schema_name;
+----
+community	github:query-farm/fixture@v1.0.0	github	v1.0.0
+mono	github:cloudquery/fixture@v1.0.0	github	v1.0.0
+
+query T
+SELECT archive_sha256 = '{CLOUDQUERY_FIXTURE_SHA256}' FROM gh.main.plugin WHERE schema_name = 'mono';
+----
+true
+
+query I
+SELECT count(*) FROM gh.mono.fixture_item;
+----
+25
+
+query I
+SELECT count(*) FROM gh.community.fixture_item_event;
+----
+50
+
+statement ok
+DETACH gh;
+
+# A pinned ref that is already cached starts with no network at all.
+statement ok
+ATTACH 'cloudquery' AS pinned (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}',
+    plugins 'mono=github:cloudquery/fixture@v1.0.0#sha256:{CLOUDQUERY_FIXTURE_SHA256}',
+    github_url 'http://127.0.0.1:9', cache_dir '{CLOUDQUERY_CACHE_DIR}');
+
+query I
+SELECT count(*) FROM pinned.mono.fixture_whoami;
+----
+1
+
+statement ok
+DETACH pinned;
+
+# A pin that does not match the cached archive is refused (and the download
+# it falls back to is refused too).
+statement error
+ATTACH 'cloudquery' AS bad (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}',
+    plugins 'github:cloudquery/fixture@v1.0.0#sha256:0000000000000000000000000000000000000000000000000000000000000001',
+    github_url '{CLOUDQUERY_MOCK_REGISTRY}', cache_dir '{CLOUDQUERY_CACHE_DIR}');
+----
+<REGEX>:.*does not match the pinned sha256.*
+
+# An archive whose sha256 differs from the published checksum is never run.
+statement error
+ATTACH 'cloudquery' AS bad (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}',
+    plugins 'github:cloudquery/tampered@v1.0.0', github_url '{CLOUDQUERY_MOCK_REGISTRY}', cache_dir '{CLOUDQUERY_CACHE_DIR}');
+----
+<REGEX>:.*does not match the published checksum.*
+
+# A release with no checksum is refused unless the ref pins one.
+statement error
+ATTACH 'cloudquery' AS bad (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}',
+    plugins 'github:cloudquery/nosum@v1.0.0', github_url '{CLOUDQUERY_MOCK_REGISTRY}', cache_dir '{CLOUDQUERY_CACHE_DIR}');
+----
+<REGEX>:.*publishes no checksum.*
+
+statement ok
+ATTACH 'cloudquery' AS nosum (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}',
+    plugins 'github:cloudquery/nosum@v1.0.0#sha256:{CLOUDQUERY_NOSUM_SHA256}', github_url '{CLOUDQUERY_MOCK_REGISTRY}', cache_dir '{CLOUDQUERY_CACHE_DIR}');
+
+query T
+SELECT schema_name FROM nosum.main.plugin;
+----
+nosum
+
+statement ok
+DETACH nosum;
+
+statement error
+ATTACH 'cloudquery' AS bad (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}',
+    plugins 'github:cloudquery/missing@v1.0.0', github_url '{CLOUDQUERY_MOCK_REGISTRY}', cache_dir '{CLOUDQUERY_CACHE_DIR}');
+----
+<REGEX>:.*publishes no checksum.*
+
+# ------------------------------------------------------------- CloudQuery Hub
+
+# The Hub refuses anonymous downloads (as api.cloudquery.io does), so an ATTACH
+# naming an uncached Hub plugin explains how to install it.
+statement error
+ATTACH 'cloudquery' AS hub (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}',
+    plugins 'cloudquery/fixture@v1.0.0', hub_url '{CLOUDQUERY_MOCK_REGISTRY}', cache_dir '{CLOUDQUERY_CACHE_DIR}');
+----
+<REGEX>:.*need an API key.*cloudquery_hub.*install_plugin.*
+
+statement ok
+ATTACH 'cloudquery' AS cq (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}', cache_dir '{CLOUDQUERY_CACHE_DIR}',
+    github_url '{CLOUDQUERY_MOCK_REGISTRY}', hub_url '{CLOUDQUERY_MOCK_REGISTRY}');
+
+statement error
+SELECT * FROM cq.main.install_plugin('cloudquery/fixture@v1.0.0');
+----
+<REGEX>:.*need an API key.*
+
+statement error
+SELECT * FROM cq.main.install_plugin('{CLOUDQUERY_FIXTURE_PLUGIN}');
+----
+<REGEX>:.*needs no download.*
+
+statement ok
+CREATE SECRET hub_bad (TYPE cloudquery_hub, API_KEY 'wrong-key', HUB_URL '{CLOUDQUERY_MOCK_REGISTRY}');
+
+statement error
+SELECT * FROM cq.main.install_plugin('cloudquery/fixture@v1.0.0');
+----
+<REGEX>:.*refused the API key.*
+
+statement ok
+DROP SECRET hub_bad;
+
+statement ok
+CREATE SECRET hub (TYPE cloudquery_hub, API_KEY 'test-hub-key', HUB_URL '{CLOUDQUERY_MOCK_REGISTRY}');
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE name = 'hub' AND secret_string LIKE '%test-hub-key%';
+----
+0
+
+query TTTT
+SELECT ref, registry, plugin_version, from_cache FROM cq.main.install_plugin('cloudquery/fixture@v1.0.0');
+----
+cloudquery/fixture@v1.0.0	cloudquery	v1.0.0	false
+
+# The signed query string of the download location is never recorded.
+query T
+SELECT source_url FROM cq.main.install_plugin('cloudquery/fixture@v1.0.0');
+----
+{CLOUDQUERY_MOCK_REGISTRY}/download/hub-fixture.zip
+
+# hub:team/name resolves the latest version through the public plugin endpoint.
+query TTT
+SELECT ref, plugin_version, from_cache FROM cq.main.install_plugin('hub:cloudquery/fixture');
+----
+cloudquery/fixture@v1.0.0	v1.0.0	true
+
+# GitHub refs install without a key.
+query TT
+SELECT ref, from_cache FROM cq.main.install_plugin('github:cloudquery/fixture@v1.0.0');
+----
+github:cloudquery/fixture@v1.0.0	true
+
+statement ok
+DROP SECRET hub;
+
+statement ok
+DETACH cq;
+
+# Installed, the Hub plugin attaches with no network and no key.
+statement ok
+ATTACH 'cloudquery' AS hub (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}',
+    plugins 'cloudquery/fixture@v1.0.0', hub_url 'http://127.0.0.1:9', cache_dir '{CLOUDQUERY_CACHE_DIR}');
+
+query TTI
+SELECT schema_name, registry, table_count FROM hub.main.plugin;
+----
+fixture	cloudquery	4
+
+query TI
+SELECT category, count(*) FROM hub.fixture.fixture_item GROUP BY ALL ORDER BY ALL;
+----
+hardware	8
+services	8
+software	9
+
+statement ok
+DETACH hub;

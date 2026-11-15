@@ -1,300 +1,242 @@
-<!-- managed-by: vgi-starters (edit upstream in shared/README.md.tmpl, then run tools/render.py) -->
 <p align="center">
   <img src="https://query.farm/media-kit/products/vgi/vgi-logo.png" alt="Vector Gateway Interface (VGI)" width="320">
 </p>
 
-<p align="center"><em>A Query.Farm VGI worker for DuckDB, written in Go.</em></p>
+<p align="center"><em>A <a href="https://query.farm">Query.Farm</a> VGI worker for DuckDB.</em></p>
 
-# VGI Cloudquery Worker — Go
+# Query Every CloudQuery Source Plugin's Tables in DuckDB
+
+> **vgi-cloudquery** · a [Query.Farm](https://query.farm) VGI worker · powered by [plugin-pb-go](https://github.com/cloudquery/plugin-pb-go)
 
 [![CI](https://github.com/Query-farm/vgi-cloudquery/actions/workflows/ci.yml/badge.svg)](https://github.com/Query-farm/vgi-cloudquery/actions/workflows/ci.yml)
 [![vgi worker: query.farm](https://query.farm/media-kit/shields/vgi-worker.svg)](https://query.farm)
 
-[VGI](https://query.farm/vgi) lets DuckDB call functions that live in a separate
-process: your code, in any language, exposed as ordinary SQL. This worker adds
-three example functions that you rename and replace with your own:
+[CloudQuery](https://www.cloudquery.io) source plugins turn cloud and SaaS APIs (AWS,
+GCP, GitHub, Kubernetes, Hacker News, ...) into tables, normally synced into a
+destination database by the CloudQuery CLI. This worker hosts those plugins
+**directly**: it starts each plugin binary, speaks the plugin protocol v3 (gRPC +
+Apache Arrow) itself, and streams the plugin's record batches into DuckDB. There is no
+CloudQuery CLI and no destination database.
 
-| Function | Kind | Shows you how to |
-|---|---|---|
-| `greet(name)` / `greet(name, style)` | scalar | vectorize over a column, overload, constrain a constant |
-| `sequence_table(count, step := 1)` | table | stream rows in batches, take named arguments |
-| `fetch_items(base_url, page_size := 100)` | table | page through a REST API, retry, read a secret |
+```sql
+ATTACH 'cloudquery' AS cq (TYPE vgi, LOCATION 'github-auto://Query-farm/vgi-cloudquery@v0.1.0',
+    plugins 'github:cloudquery/test@v4.1.0, crowdstrike=github:justmiles/crowdstrike@v2.1.0',
+    spec    '{"test": {"num_rows": 3}}');
 
+SELECT p.resource_id, count(*) AS subs
+FROM cq.test.test_some_table p JOIN cq.test.test_sub_table s ON s._cq_parent_id = p._cq_id
+GROUP BY ALL;
+```
+
+- **Each plugin is a schema, each plugin table a table**, child relations included.
+- **Arrow end to end**: the plugin's record batches reach DuckDB with their buffers
+  intact; CloudQuery's `uuid` and `json` columns arrive as `UUID` and `JSON`.
+- **Plugins come from** a local binary, a GitHub release, the CloudQuery Hub (API key
+  required, see below) or an already-running plugin server. Downloads are sha256-verified
+  and cached.
+- **Specs with credentials live in DuckDB secrets** (`TYPE cloudquery`), never in the
+  ATTACH string.
 
 ## Quick start
 
-**Prerequisites:** Go 1.26+ and [uv](https://docs.astral.sh/uv/) (it runs the SQL
-test runner and the metadata checker).
-
-```bash
-make build
-```
-
-Then open DuckDB 2.0 or [Haybarn](https://query.farm/products/haybarn) and attach the
-worker. `LOCATION` is the command DuckDB runs to start it; use an absolute path,
-because a relative one resolves against DuckDB's working directory.
-
-**DuckDB 2.0:**
-
-```sql
-SET allow_extension_repositories = 'allowed';
-CREATE EXTENSION REPOSITORY IF NOT EXISTS query_farm WITH PREFIX 'https://duckdb-extensions.query.farm';
-INSTALL vgi FROM query_farm;
-LOAD vgi FROM query_farm;
-ATTACH 'cloudquery' (TYPE vgi, LOCATION '/abs/path/to/vgi-cloudquery/bin/vgi-cloudquery-worker');
-```
-
-**Haybarn 2.0** (`uvx haybarn-cli`):
+Download the release archive for your platform from the
+[releases page](https://github.com/Query-farm/vgi-cloudquery/releases), or let the VGI
+extension fetch it with `github-auto://` (change `@v0.1.0` to the release you want):
 
 ```sql
 INSTALL vgi FROM community;
 LOAD vgi;
-ATTACH 'cloudquery' (TYPE vgi, LOCATION '/abs/path/to/vgi-cloudquery/bin/vgi-cloudquery-worker');
+
+ATTACH 'cloudquery' AS cq (TYPE vgi, LOCATION 'github-auto://Query-farm/vgi-cloudquery@v0.1.0',
+    plugins 'github:cloudquery/test@v4.1.0');
+
+FROM cq.main.plugin;          -- what was attached
+FROM cq.main.plugin_table;    -- every table, its parent relation and primary key
+FROM cq.main.plugin_column;   -- every column, its CloudQuery and DuckDB types
+FROM cq.test.test_some_table;
 ```
 
-Now call the functions:
+Other ways to run it: point `LOCATION` at the extracted binary
+(`/opt/vgi-cloudquery-worker`), run it as an HTTP service (`vgi-cloudquery-worker --http
+--port 8000`, then `LOCATION 'http://host:8000'`), or build from source (`make build`,
+Go 1.26+, pure Go).
 
-```sql
-SELECT cloudquery.main.greet('Ada');                         -- Hi, Ada!
-SELECT cloudquery.main.greet('Ada', 'formal');               -- Good day, Ada.
-SELECT * FROM cloudquery.main.sequence_table(5, step := 2) ORDER BY n;
-```
+## Which plugins can you use?
 
-`fetch_items` pages through a REST API. Try it against the public demo API (25 fixed items):
+Checked on 2026-11-15 against the public Hub API and GitHub:
 
-```sql
-SELECT category, count(*) AS items, round(avg(price), 2) AS avg_price
-FROM cloudquery.main.fetch_items('https://vgi-starter-api.query-farm.services/v1')
-GROUP BY category ORDER BY category;
-```
+| Source | Anonymous download | How to use it here |
+|---|---|---|
+| **CloudQuery Hub** (`api.cloudquery.io`): 162 source plugins, 119 paid (`aws`, `gcp`, `azure`, `github`, `k8s`, `postgresql`, `file`, ...) and 16 free (official: `airtable`, `bitly`, `hackernews`, `square`, `typeform`, `xkcd`; 10 community) | **No.** The asset endpoint answers 401 to anonymous callers for every plugin, free ones included. | Create a CloudQuery account and API key yourself, `CREATE SECRET (TYPE cloudquery_hub, API_KEY '...')`, then `SELECT * FROM cq.main.install_plugin('cloudquery/xkcd@v1.6.1')`. Paid plugins and paid tables also need the key at run time (they report usage) and a plan that covers them. |
+| **CloudQuery monorepo GitHub releases** (`plugins-source-<name>-<version>`) | Yes, but frozen: binaries were attached until early 2024 (e.g. `test` v4.1.0, `hackernews` v3.0.23, `aws` v22.19.2, `gcp` v10.0.0, `k8s` v6.0.4, `github` v8.0.0) | `github:cloudquery/<name>@<version>`. Old official plugins may now require a login of their own; `test` v4.1.0 works offline. |
+| **Community GitHub releases** (`<team>/cq-source-<name>`) | Yes | `github:<team>/<name>@<version>`, e.g. `github:justmiles/crowdstrike@v2.1.0`, `github:hermanschaaf/chess-com@v1.0.1`. Plugins built with plugin-sdk v1-v3 speak older protocols and are refused with a clear error (`coinpaprika` v1.0.1, `onfleet` v1.0.0). |
+| **Source code** | The cloudquery monorepo (MPL-2.0) still contains `airtable`, `bitbucket`, `hackernews`, `square`, `test`, `typeform` and `xkcd` | Build the plugin yourself and use its local path. |
+| **Docker-packaged plugins** (e.g. Hub `typeform`) | n/a | Not started by this worker. Run the container yourself (`docker run -p 7777:7777 <image> serve --address 0.0.0.0:7777`) and attach `grpc:127.0.0.1:7777`. |
 
-If an older cached extension misbehaves, refresh it with `FORCE INSTALL vgi FROM query_farm;`
-(DuckDB) or `FORCE INSTALL vgi FROM community;` (Haybarn).
+The worker never uses a `cloudquery login` session: plugins run with a private
+`XDG_DATA_HOME` and without any `CLOUDQUERY_API_KEY` from the environment, so the only
+CloudQuery key a plugin ever sees is the one in a `cloudquery_hub` secret.
 
-## Using it in a pipeline
+## ATTACH options
 
-Worker functions compose with everything else in DuckDB:
-
-```sql
--- Materialize an API into a local table.
-CREATE TABLE items AS SELECT * FROM cloudquery.main.fetch_items('https://vgi-starter-api.query-farm.services/v1');
-
--- Join it with local files.
-SELECT i.name, i.price, s.units
-FROM items i JOIN 'sales.parquet' s ON s.item_id = i.id;
-
--- Call a scalar per row of another table.
-SELECT customer, cloudquery.main.greet(customer, 'formal') FROM read_csv('customers.csv');
-```
-
-## Project layout
-
-```
-cmd/vgi-cloudquery-worker/  # main.go: the worker binary (flags -> serve.Main)
-internal/cloudquery/
-  worker.go        # assembles the catalog; register new functions in NewWorker
-  meta.go          # catalog/schema metadata + helpers (objectTags, column)
-  greet.go         # scalar example (overloads, constant arg with choices)
-  sequence.go      # table function example (named args, streaming state)
-  fetch_items.go   # REST API table function (pagination, retries, secrets)
-  version.go       # the worker version (checked against release tags)
-  *_test.go        # go test unit tests
-internal/serve/    # --http / --unix / stdio and logging flags, shared with recipes
-test/sql/          # sqllogictest files run through DuckDB
-test/mock_api/     # offline mock of the REST API used by tests
-examples/          # recipes (one package main, served by bin/recipes <name>)
-ci/                # integration harness used by `make test-sql` and CI
-scripts/           # vgi_template.py (init / template-diff)
-vgi-agent-tests.yaml  # private graders for the agent test tasks
-```
-
-## Adding a function
-
-1. Create `internal/cloudquery/<name>.go`. Copy the closest example: `greet.go` for a
-   scalar, `sequence.go` for a generator, `fetch_items.go` for an API.
-2. Declare arguments as a struct with `vgi:"..."` tags. Use `pos=N` for positional
-   arguments and `default=V` (no `pos`) for named ones; add `ge=`, `le=`, `pattern=` or
-   `choices='a,b'` constraints. Scalar column arguments are `*array.String` (etc.) fields
-   with `const=false`. `doc=` must be the last key in the tag.
-3. Implement `Name()`, `Metadata()` (with `Description`, `Tags: withExamples(objectTags(...), examples)`
-   and `Examples`), then `OnBindTyped`/`ProcessTyped` (scalar, wrap with
-   `vgi.AsScalarFunction[Args]`) or `ArgumentSpecs`/`OnBind`/`NewState`/`Process` (table,
-   wrap with `vgi.AsTableFunction[State]`).
-4. Register it in `NewWorker` in `internal/cloudquery/worker.go`, and add its examples to
-   `allExamples`.
-
-**Which kind of function?**
-
-| You want to… | Use |
+| Option | Meaning |
 |---|---|
-| compute one value per input row | a **scalar** function |
-| return a set of rows from arguments (an API, a file, a generator) | a **table** function |
-| transform or aggregate the rows of a query | a **table in-out** function or an **aggregate** |
-| expose a fixed dataset by name (`SELECT * FROM cloudquery.main.t`) | a **catalog table** |
-| write data out to a file or service | `COPY … TO` with a copy function |
-| accept `INSERT` / `UPDATE` / `DELETE` | a catalog table with insert/update/delete functions |
+| `plugins` | Comma-separated `[schema=]ref` entries. Each plugin becomes a schema, named after the plugin unless `schema=` is given. |
+| `spec` | Non-secret plugin specs: a JSON or YAML object keyed by schema, each value the plugin's own `spec:` block (`{"hackernews": {"item_concurrency": 10}}`). Used to discover tables at ATTACH and for every query. |
+| `cache_dir` | Where downloaded plugins are kept (default `<user cache dir>/vgi-cloudquery/plugins`). |
+| `hub_url` | CloudQuery Hub API base URL (default `https://api.cloudquery.io`), for mirrors and tests. |
+| `github_url` | Base URL for GitHub release downloads (default `https://github.com`), for mirrors and tests. |
 
-The [examples/](examples/) folder has a recipe for most of these. Writable tables have no
-recipe:
+Plugin refs:
 
-A writable table is a `vgi.CatalogTable` that names a table in-out function per operation in
-`InsertFunction`, `UpdateFunction` and `DeleteFunction`, with the richest result each one
-produces in `WriteResultModes`. A write function declares `vgi.WriteOptionsArgSpec()`, reads
-the requested mode with `vgi.ParseWriteOptions`, and binds and emits
-`vgi.WriteResultSchema` / `vgi.WriteResultBatch`. UPDATE and DELETE need a `vgi.RowIDField`
-column emitted by a scan that declares projection pushdown. Transactions:
-`vgi.WithSupportsTransactions` (or `AttachDecision.SupportsTransactions` per ATTACH) and
-`vgi.WithTransactionHooks`. Since VGI protocol 3.3 a table's scan and write functions are
-table-only: hidden from `duckdb_functions()` and not callable from SQL. Set `ExposeScan: true`
-on the table to keep the scan callable as an ordinary table function too (write functions never
-are). The write helpers and transaction hooks need vgi-go v0.42.0 or newer: if `go.mod` has an
-older v0.42.x, run `go get github.com/Query-farm/vgi-go@v0.42` (the newest v0.42.x; every
-v0.42.x speaks the same protocol). See
-[Writable catalog tables](https://github.com/Query-farm/vgi-go#writable-catalog-tables) and
-[`examples/writable_tx`](https://github.com/Query-farm/vgi-go/tree/main/examples/writable_tx).
+| Ref | Means |
+|---|---|
+| `/opt/cq-source-xkcd` | a local binary (also `./`, `../`, `~/`) |
+| `cloudquery/xkcd@v1.6.1` | CloudQuery Hub (the CLI's default `cloudquery` registry) |
+| `hub:cloudquery/xkcd` | Hub, latest version (resolved through the public plugin endpoint) |
+| `github:cloudquery/test@v4.1.0` | a GitHub release asset (the CLI's `github` registry) |
+| `...#sha256:<hex>` | pins the archive's sha256 (required when a release publishes no checksum) |
+| `grpc:127.0.0.1:7777` | a plugin server that is already running |
 
-## Secrets and configuration
+A worker can also be started with defaults for ATTACHes that name no plugins, which suits
+a hosted HTTP worker that serves a fixed set: `vgi-cloudquery-worker --http --plugins
+'github:cloudquery/test@v4.1.0' --plugin-spec '{"test": {"num_rows": 5}}'` (also
+`--cache-dir`, `--hub-url`, `--github-url`).
 
-`fetch_items` shows the recommended pattern. A bearer token comes from a DuckDB secret
-when one exists, and from an environment variable otherwise:
+## Credentials
+
+Put a plugin's credentials in a DuckDB secret. Its `SPEC` is the JSON or YAML of the
+plugin's `spec:` block, deep-merged over the ATTACH `spec` at query time (a key set in
+both is taken from the secret):
 
 ```sql
-CREATE SECRET (TYPE cloudquery_api, TOKEN 'your-token');      -- per session, never logged
+CREATE SECRET crowdstrike (TYPE cloudquery, PLUGIN 'crowdstrike',
+    SPEC '{"client_id": "...", "client_secret": "..."}', SCOPE 'cloudquery://crowdstrike');
+SELECT hostname, platform_name FROM cq.crowdstrike.crowdstrike_falcon_hosts LIMIT 10;
 ```
 
-```bash
-CLOUDQUERY_API_TOKEN=your-token make run-http                # for servers and containers
-```
+- The worker looks the secret up in scope `cloudquery://<schema>`; give each plugin's
+  secret that scope when you have more than one.
+- `PLUGIN` names the schema or plugin the secret configures; a secret naming another
+  plugin is ignored, so credentials never reach the wrong plugin.
+- `SPEC` is redacted in `duckdb_secrets()` and never stored in scan state or logs.
+- Cloud SDK credential chains (`~/.aws`, `AWS_PROFILE`, `GOOGLE_APPLICATION_CREDENTIALS`,
+  `~/.kube/config`) work as they do under the CloudQuery CLI: plugins inherit the
+  worker's environment.
 
-Try it: the demo API's `/v1/auth` endpoint needs the published token `demo-token`.
+`CREATE SECRET (TYPE cloudquery_hub, API_KEY '...', TEAM '...')` holds a CloudQuery API
+key for `install_plugin` and for paid plugins.
 
-```sql
-SELECT count(*) FROM cloudquery.main.fetch_items('https://vgi-starter-api.query-farm.services/v1/auth');   -- fails: HTTP 401
-CREATE SECRET (TYPE cloudquery_api, TOKEN 'demo-token');
-SELECT count(*) FROM cloudquery.main.fetch_items('https://vgi-starter-api.query-farm.services/v1/auth');   -- 25
-```
+## How queries run
 
-Never bake credentials into the image or the source. If a function can't run without
-real credentials, its examples can't execute in CI either. Set `execute: false` on the
-metadata check for that worker (see `.github/workflows/ci.yml`), and add
-`LINT_ARGS ?= --no-execute` to the Makefile so local runs match.
+- **One sync per query.** Each table scan runs a plugin `Sync` of just that table
+  (`skip_dependent_tables`), so a query costs the same API calls as a CloudQuery sync of
+  the table. Reading a child table makes the plugin walk its parent too; the parent's
+  rows are dropped.
+- **Pushdown.** Table selection and projection: only the selected columns are sent to
+  DuckDB. CloudQuery plugins accept **no per-query filters**, so every `WHERE` clause is
+  applied by DuckDB after the rows arrive (exactly, for every type and session time
+  zone, because the worker declares no filter pushdown).
+- **Limit.** DuckDB stops reading once a `LIMIT` is met and the worker cancels the
+  plugin's sync. `cloudquery.main.scan(schema, table_name, max_rows := N)` stops the sync
+  after N rows of the table.
+- **Relations.** Child tables join their parent with `child._cq_parent_id =
+  parent._cq_id`. The worker asks for deterministic cq ids, so separate syncs of a parent
+  and a child line up whenever the parent has a primary key.
+- **Sync messages.** `insert` batches are projected and streamed; `migrate_table` and
+  `delete_record` (destination concerns) are skipped. A plugin's per-table `error` is
+  logged and the rows fetched so far are returned, as the CloudQuery CLI does;
+  `strict := true` makes it fail the query.
+- **Streaming.** Record batches are coalesced into batches of up to 2048 rows, flushed
+  after 250 ms, so a slow API still shows its first rows promptly.
+- **Processes.** Plugins are pooled per (plugin, schema, spec); a plugin serves one sync
+  at a time, so concurrent scans start more processes (at most 16). Idle plugins stop
+  after 10 minutes. Each plugin runs under a small supervisor that kills it when the
+  worker exits, however the worker ends. Plugin logs go to the worker's stderr.
+
+Type mapping:
+
+| CloudQuery (Arrow) | DuckDB |
+|---|---|
+| `uuid` extension | `UUID` (same buffers) |
+| `json` extension | `JSON` (same buffers) |
+| `inet` extension | `VARCHAR`, e.g. `10.0.0.1/32` (same buffers) |
+| `mac` extension | `VARCHAR`, e.g. `02:00:00:00:00:01` |
+| `timestamp[*, UTC]` | `TIMESTAMP WITH TIME ZONE` (`TIMESTAMPTZ_NS` for ns) |
+| lists, structs, maps | `LIST`, `STRUCT`, `MAP`, element types mapped the same way |
+| everything else | the Arrow type's DuckDB equivalent (`int64` to `BIGINT`, `decimal128` to `DECIMAL`, ...) |
+
+The published `cloudquery/test` plugin's `test_testdata_table` (79 columns, one of every
+Arrow type CloudQuery uses) reads cleanly.
+
+## Functions and tables
+
+| Object | What it is |
+|---|---|
+| `<schema>.<table>` | One per plugin table. |
+| `main.plugin` | The attached plugins: ref, registry, version, verified digests, table count, spec JSON Schema. |
+| `main.plugin_table` | Every plugin table: parent relation, child tables, primary key columns, incremental/paid flags. |
+| `main.plugin_column` | Every column: CloudQuery type, DuckDB type, nullability, key flags. |
+| `main.scan(schema, table_name, max_rows := 0, strict := false)` | Reads one plugin table directly. Use it for plugins whose tables depend on credentials only a secret holds, since catalog tables are discovered with the ATTACH spec. |
+| `main.install_plugin(ref)` | Downloads a Hub or GitHub plugin into the verified cache. |
+
+## Plugin downloads
+
+1. **GitHub**: `checksums.txt` is fetched from the release and the archive's sha256 must
+   match its entry (or the ref's `#sha256:` pin); a release with no checksum is refused
+   unless pinned.
+2. **Hub**: the asset endpoint returns a download location and the archive's sha256; the
+   archive must match it. The download URL's signed query string is never logged or
+   recorded.
+3. The plugin binary is unpacked only after verification, and its own sha256 is recorded
+   and re-checked whenever the cache is reused, so a cached plugin that changed on disk is
+   downloaded again rather than run.
+
+A ref with a version that is already cached never touches the network.
+
+## Known limitations
+
+- **No filter pushdown exists** in the CloudQuery plugin protocol: a query reads the
+  whole table (and, for a child table, its parents) from the API.
+- **Incremental tables** are always read in full: the worker passes no state backend.
+- **Dynamic-schema plugins** (for example `postgresql`, `sharepoint`) report their tables
+  only once connected. Catalog tables are discovered with the ATTACH spec and no
+  connection; read the others with `scan()`, which connects with the secret applied.
+- **HTTP scale-out**: a scan resumed on another worker process re-syncs and skips the rows
+  already returned. Plugins sync concurrently, so row order can differ between syncs; use
+  sticky routing when running several HTTP worker processes.
+- Plugins built with plugin-sdk v1-v3 (protocols v1/v2) are not supported.
 
 ## Testing
 
-```bash
-make test-unit                 # fast Go unit tests
-make test-sql                  # test/sql/*.test through DuckDB (stdio)
-make test-sql TRANSPORT=http   # …over HTTP (also: launch)
-make check                     # everything CI runs
-```
+`make check` runs gofmt/vet/golangci-lint, the Go unit tests, the SQL tests over stdio,
+launch and HTTP, and the metadata lint. The SQL tests use:
 
-`test/sql/*.test` files are [sqllogictest](https://duckdb.org/docs/stable/dev/sqllogictest/intro)
-scripts. `ci/run-integration.sh` runs them against your worker and fails on any
-unexpected skip, so a broken transport can't hide behind a green run.
-`fetch_items` is tested against `test/mock_api/server.py` so tests are fast and
-offline.
-
-**Testing against real data:** put live tests in their own `.test` file that starts with
-`require-env CLOUDQUERY_LIVE`. They run only when that variable is set. Add the skip reason
-to `EXPECTED_SKIP_REASONS` in CI.
-
-## Metadata and the quality score
-
-DuckDB, agents and documentation tools discover your functions through their metadata:
-titles, descriptions, argument docs, examples and keywords.
-[vgi-lint](https://github.com/Query-farm/vgi-lint-check) checks it, and CI runs it on
-every push. Its settings live in `vgi-lint.toml`, which `make lint-explain`,
-`vgi-lint lint`, and CI all read. This template scores 100/100 with no findings.
-
-```bash
-make lint-explain                              # findings, each with its fix
-make lint-explain LINT_ARGS="--format agent"   # the same, grouped for coding agents
-make lint-ai                                   # optional: an agent must solve vgi-agent-tests.yaml
-```
-
-Each report also states an **assurance level**: how much was actually verified.
-
-| Level | Reached when | Here |
-|---|---|---|
-| L1 structural | the static metadata is clean | workers that need real credentials (`execute: false` in CI) |
-| L2 behavioural | the examples also run and return what they claim | **the CI gate** |
-| L3 semantic | an agent solves the worker's own test tasks, and the docs are reviewed | `make lint-ai`, before publishing |
-
-- **How strict.** Your copy fails on warnings (`fail_on = "warning"` in `vgi-lint.toml`).
-  Raise it to `"info"` before you publish the worker for others.
-- **The linter isn't pinned.** It tracks the current quality bar, so a new rule can flag
-  metadata that passed yesterday. Fix it, or waive the finding.
-- **Waivers.** If a finding is genuinely wrong for your worker, waive it in
-  `vgi-lint.toml` with a `kind` and a `reason`.
-- **Existing workers.** If you're adding this gate to a worker that already has
-  findings, record them with `vgi-lint lint --baseline vgi-lint-baseline --update-baseline`
-  and set `baseline` in `vgi-lint.toml`. After that, only new findings fail.
-
-Metadata lives in `internal/cloudquery/meta.go` and each function's `Metadata()`.
-
-## Logging and debugging
-
-stdout carries the Arrow protocol, so **never print to stdout**. Log to stderr instead.
-Use `log/slog` (the SDK configures it to write to stderr); `--debug` or `--log-level debug` turns it up.
-
-- Under DuckDB (stdio/launch), worker stderr shows up in DuckDB's error messages and
-  terminal.
-- In Docker it goes to `docker logs`.
-- `make debug` runs one query against the worker with debug logging on.
-
-## Deploying
-
-The same binary serves stdio (DuckDB starts it locally) or HTTP (you host it):
-
-```bash
-docker build -t weather-worker .
-docker run -p 8000:8000 -e CLOUDQUERY_API_TOKEN=... weather-worker   # health: GET /health
-```
-
-```sql
-ATTACH 'cloudquery' (TYPE vgi, LOCATION 'https://workers.example.com/cloudquery');
-```
-
-Put hosted workers behind TLS and authentication. See
-[authentication](https://query.farm/vgi/authentication) for bearer tokens and JWTs, and
-[distributing a worker](https://query.farm/vgi/distributing-a-worker) for packaging.
-Pass secrets with `-e` or your platform's secret manager.
-
-## Releasing
-
-Push a tag like `v0.1.0`. The release workflow builds signed binaries for linux (amd64, arm64), macOS (arm64) and Windows (amd64) as static pure-Go binaries, and attaches them to the GitHub release. Users download the archive for their platform and point `LOCATION` at the binary inside. Go developers can also `go install github.com/Query-farm/vgi-cloudquery/cmd/vgi-cloudquery-worker@v0.1.0`. Every artifact is signed with cosign and
-carries SLSA build provenance. `ci/check-version.sh` makes sure the tag matches the
-version in `internal/cloudquery/version.go`.
-
-## Using with coding agents
-
-[AGENTS.md](AGENTS.md) is written for AI coding agents (Claude Code reads it via
-`CLAUDE.md`; Codex, Cursor and others read it directly). It covers the commands, the
-recipe for adding a function, the metadata checklist and the sharp edges. A good first
-prompt:
-
-> Read AGENTS.md. Replace `fetch_items` with `forecast(lat DOUBLE, lon DOUBLE)` that calls
-> the Open-Meteo API. Include full metadata, a mock-server test and a `CLOUDQUERY_LIVE` test.
-> You're done when `make check` passes.
-
-## Keeping up with the template
-
-`make template-diff` shows what changed upstream (CI, docs, examples) since your copy was
-made. Your copy records its template version in `.vgi-cloudquery.json`.
-
-## Learn more
-
-- [What is VGI?](https://query.farm/vgi) · [Getting started](https://query.farm/vgi/getting-started) · [Building a worker](https://query.farm/vgi/building-a-worker)
-- [Go SDK docs](https://query.farm/vgi/docs/go/): [scalar tutorial](https://query.farm/vgi/docs/go/tutorial/scalar/), [table tutorial](https://query.farm/vgi/docs/go/tutorial/table/)
-- [Distributing a worker](https://query.farm/vgi/distributing-a-worker) · [Choosing a language](https://query.farm/vgi/languages) · [llms.txt](https://query.farm/vgi/llms.txt)
-- SDK source: [vgi-go](https://github.com/Query-farm/vgi-go) · RPC layer: [https://vgi-rpc-go.query.farm](https://vgi-rpc-go.query.farm)
+- **`test/fixture-plugin/`**: a small source plugin built with the real CloudQuery
+  plugin-sdk v4 (its own Go module). It has a parent table with a child relation, every
+  extension type (`uuid`, `json`, `inet`, `mac`, `list<uuid>`), NULLs, a table whose
+  resolver fails partway, and a spec echo for the secret tests, so the suite needs no
+  network or CloudQuery account.
+- **`test/mock_registry/server.py`**: a mock CloudQuery Hub API (401 without the test key,
+  as the real Hub) and GitHub release host serving that plugin as archives, including a
+  tampered archive and a release without checksums.
+- **`test/sql/live_test_plugin.test`**: the published `cloudquery/test` v4.1.0 from its
+  GitHub release. It is cached under `.tools/plugin-cache` and skipped when GitHub is
+  unreachable and nothing is cached.
 
 ## Support
 
 Open an issue on this repository. For VGI itself, see [query.farm](https://query.farm).
 
-## Authorship & license
+## Authorship & License
 
-The starter template is written by [Query.Farm](https://query.farm) and released under
-the [BSD Zero Clause License](LICENSE) (0BSD). Use it for anything, with no attribution
-required. Replace this section with your own license once the code is yours.
+Written by [Query.Farm](https://query.farm). Released under the
+[BSD Zero Clause License](LICENSE) (0BSD).
+
+Copyright 2026 Query Farm LLC - https://query.farm
+
+The worker links [plugin-pb-go](https://github.com/cloudquery/plugin-pb-go) (MPL-2.0)
+for the plugin protocol; the test fixture plugin uses
+[plugin-sdk](https://github.com/cloudquery/plugin-sdk) (MPL-2.0). CloudQuery and its
+plugins are products of CloudQuery, Inc.: each plugin you fetch is distributed under its
+own license and terms, and Hub plugins under your CloudQuery account's terms.

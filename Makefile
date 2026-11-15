@@ -10,6 +10,7 @@ GOLANGCI_LINT_VERSION ?= v2.14.0
 EXE             := $(if $(filter Windows_NT,$(OS)),.exe,)
 WORKER          := $(CURDIR)/bin/vgi-cloudquery-worker$(EXE)
 RECIPES         := $(CURDIR)/bin/recipes$(EXE)
+FIXTURE_PLUGIN  := $(CURDIR)/bin/cq-source-fixture$(EXE)
 TOOLS           := $(CURDIR)/.tools
 HAYBARN_UNITTEST := $(TOOLS)/bin/haybarn-unittest
 GOLANGCI_LINT   := $(TOOLS)/bin/golangci-lint$(EXE)
@@ -24,9 +25,10 @@ help: ## List the targets
 	@awk 'BEGIN{FS=":.*## "} /^[a-zA-Z_-]+:.*## /{printf "  %-14s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 
 
-build: ## Build the worker and the recipes into bin/
+build: ## Build the worker, the recipes and the fixture plugin into bin/
 	go build -o $(WORKER) ./cmd/vgi-cloudquery-worker
 	go build -o $(RECIPES) ./examples
+	cd test/fixture-plugin && go build -o $(FIXTURE_PLUGIN) .
 
 tools: $(GOLANGCI_LINT) ## Install the pinned SQL test runner and golangci-lint into .tools
 	@test -x $(HAYBARN_UNITTEST) || { uv venv -q --allow-existing $(TOOLS) && uv pip install -q -p $(TOOLS) haybarn-unittest==$(HAYBARN_VERSION); }
@@ -43,11 +45,12 @@ lint: $(GOLANGCI_LINT) ## Static checks: gofmt, go vet, golangci-lint
 	go vet ./...
 	$(GOLANGCI_LINT) run ./...
 
-test-unit: ## Unit tests (go test)
-	go test ./...
+test-unit: build ## Unit tests (go test), including the fixture plugin module
+	FIXTURE_PLUGIN=$(FIXTURE_PLUGIN) go test ./...
+	cd test/fixture-plugin && go vet ./...
 
 test-sql: build tools ## SQL tests through DuckDB: make test-sql TRANSPORT=stdio|launch|http
-	WORKER=$(WORKER) RECIPES_WORKER="$(RECIPES)" HAYBARN_UNITTEST=$(HAYBARN_UNITTEST) TRANSPORT=$(TRANSPORT) PYTHON="uv run --no-project python" ci/run-integration.sh
+	WORKER=$(WORKER) FIXTURE_PLUGIN=$(FIXTURE_PLUGIN) RECIPES_WORKER="$(RECIPES)" HAYBARN_UNITTEST=$(HAYBARN_UNITTEST) TRANSPORT=$(TRANSPORT) PYTHON="uv run --no-project python" ci/run-integration.sh
 
 test-sql-all: ## SQL tests over every transport
 	$(MAKE) test-sql TRANSPORT=stdio
@@ -57,7 +60,7 @@ test-sql-all: ## SQL tests over every transport
 test: test-unit test-sql ## Unit + SQL tests
 
 lint-explain: build ## Metadata quality report (vgi-lint, settings in vgi-lint.toml). LINT_ARGS="--format agent" for agents
-	$(VGI_LINT) "$(WORKER)" $(LINT_ARGS)
+	$(VGI_LINT) "$(WORKER) --plugins fixture=$(FIXTURE_PLUGIN) --cache-dir $(TOOLS)/plugin-cache" $(LINT_ARGS)
 
 lint-ai: ## Opt-in L3 check: an agent runs vgi-agent-tests.yaml and docs are reviewed (needs the claude CLI)
 	@$(MAKE) --no-print-directory lint-explain LINT_ARGS="--ai $(LINT_ARGS)"
@@ -71,7 +74,7 @@ run-http: build ## Serve over HTTP on port 8000
 	$(WORKER) --http --host 127.0.0.1 --port 8000
 
 debug: build tools ## Run one query against the worker with debug logging on stderr
-	@printf "LOAD vgi;\nATTACH 'cloudquery' (TYPE vgi, LOCATION '$(WORKER) --debug');\nSELECT cloudquery.main.greet('debug');\n" \
+	@printf "LOAD vgi;\nATTACH 'cloudquery' (TYPE vgi, LOCATION '$(WORKER) --debug', plugins 'fixture=$(FIXTURE_PLUGIN)');\nSELECT category, count(*) FROM cloudquery.fixture.fixture_items GROUP BY ALL ORDER BY ALL;\n" \
 	  | uvx --from haybarn-cli==$(HAYBARN_VERSION) haybarn -no-agent
 
 template-diff: ## Show upstream template changes since this project was created

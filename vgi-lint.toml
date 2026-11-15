@@ -4,10 +4,10 @@
 # contract with `vgi-lint spec`.
 
 # The worker to attach, relative to this directory. Build it first with `make build`.
-location = "bin/vgi-cloudquery-worker"
+location = "bin/vgi-cloudquery-worker --plugins fixture=bin/cq-source-fixture --cache-dir .tools/plugin-cache"
 
 # Fail on warnings while you build. Raise this to "info" before you publish the worker.
-fail_on = "warning"
+fail_on = "info"
 
 # Waive a finding only with a kind and a reason, so the waiver can be audited:
 #   domain-exemption  permanent and legitimate for this worker
@@ -18,7 +18,20 @@ ignore = [
   # { code = "VGI146", kind = "domain-exemption", reason = "every entry point needs a key" },
 ]
 
+
 # Adopting the gate on a worker that already has findings? Record them once with
 #   vgi-lint lint --baseline vgi-lint-baseline --update-baseline
 # and uncomment the next line. Only new findings fail after that.
 # baseline = "vgi-lint-baseline"
+
+# Plugin schemas are generated per ATTACH from whatever the plugin reports (the fixture
+# plugin's tables stand in for every plugin here). CloudQuery plugins declare primary keys
+# (listed in main.plugin_table.primary_key_columns), but the worker passes a sync's rows
+# through without deduplicating them, so it cannot attest an ENFORCED key; likewise
+# _cq_parent_id -> _cq_id is CloudQuery's relation convention, documented on every child
+# table, not a constraint the worker can enforce across separate syncs.
+[per_object."cloudquery.fixture.*"]
+ignore = [
+  { code = "VGI807", kind = "domain-exemption", reason = "plugin primary keys are not deduplicated by the worker, so no ENFORCED key can be attested" },
+  { code = "VGI809", kind = "domain-exemption", reason = "_cq_id/_cq_parent_id are CloudQuery's relation convention, documented per child table; not an enforceable foreign key" },
+]

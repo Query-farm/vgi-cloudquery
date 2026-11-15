@@ -1,148 +1,353 @@
 # name: test/sql/cloudquery.test
-# description: SQL-level tests for the cloudquery worker, run through DuckDB by ci/run-integration.sh
+# description: Host the in-repo fixture plugin (built with the CloudQuery plugin-sdk) from a local path
 # group: [cloudquery]
-# managed-by: vgi-starters (edit upstream in shared/, then run tools/render.py)
 
 require vgi
 
 require-env CLOUDQUERY_WORKER
 
-require-env CLOUDQUERY_MOCK_API
-
-require-env CLOUDQUERY_MOCK_API_AUTH
+require-env CLOUDQUERY_FIXTURE_PLUGIN
 
 statement ok
-ATTACH 'cloudquery' (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}');
+LOAD json;
 
-# ---------------------------------------------------------------- greet (scalar)
-
-query T
-SELECT cloudquery.main.greet('Ada');
-----
-Hi, Ada!
-
-query T
-SELECT cloudquery.main.greet('Ada', 'formal');
-----
-Good day, Ada.
-
-# NULL in, NULL out.
-query T
-SELECT cloudquery.main.greet(NULL);
-----
-NULL
-
-# Works over a whole column, one result per row.
-query T
-SELECT cloudquery.main.greet(name) FROM (VALUES ('Ada'), ('Grace'), (NULL)) AS t(name) ORDER BY ALL NULLS LAST;
-----
-Hi, Ada!
-Hi, Grace!
-NULL
-
-# `style` is constrained to 'casual' | 'formal' and checked when the query is bound.
-# (No expected message: each SDK words constraint errors its own way.)
-statement error
-SELECT cloudquery.main.greet('Ada', 'loud');
-----
-<REGEX>:.*
-
-# ------------------------------------------------------ sequence_table (table fn)
-
-query II
-SELECT n, squared FROM cloudquery.main.sequence_table(4) ORDER BY n;
-----
-0	0
-1	1
-2	4
-3	9
-
-# Named argument with a default.
-query I
-SELECT n FROM cloudquery.main.sequence_table(3, step := 5) ORDER BY n;
-----
-0
-5
-10
-
-# Larger than one batch: the cursor must carry across process calls.
-query II
-SELECT count(*), max(n) FROM cloudquery.main.sequence_table(25000);
-----
-25000	24999
+# Without plugins the catalog holds only the worker's own functions and tables.
+statement ok
+ATTACH 'cloudquery' AS bare (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}');
 
 query I
-SELECT count(*) FROM cloudquery.main.sequence_table(0);
+SELECT count(*) FROM bare.main.plugin;
 ----
 0
 
-# count is constrained to [0, 1000000].
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'bare' AND schema_name NOT IN ('main', 'information_schema', 'pg_catalog');
+----
+0
+
 statement error
-SELECT * FROM cloudquery.main.sequence_table(-1);
+SELECT count(*) FROM bare.main.scan('fixture', 'fixture_item');
 ----
-<REGEX>:.*
+<REGEX>:.*no CloudQuery plugins are attached.*
 
-# Named arguments are constrained too: step >= 1.
+statement ok
+DETACH bare;
+
+# ------------------------------------------------------------ option errors
+
 statement error
-SELECT * FROM cloudquery.main.sequence_table(3, step := 0);
+ATTACH 'cloudquery' AS bad (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}', plugins 'docker:ghcr.io/cloudquery/foo:1');
 ----
-<REGEX>:.*
+<REGEX>:.*docker plugins are not started by this worker.*grpc:.*
 
-# ------------------------------------------------- fetch_items (REST table fn)
-
-query IIT
-SELECT count(*), sum(id), min(name) FROM cloudquery.main.fetch_items('{CLOUDQUERY_MOCK_API}', page_size := 4);
+statement error
+ATTACH 'cloudquery' AS bad (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}', plugins 'main={CLOUDQUERY_FIXTURE_PLUGIN}');
 ----
-25	325	item-01
+<REGEX>:.*reserved.*
+
+statement error
+ATTACH 'cloudquery' AS bad (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}', plugins 'fixture={CLOUDQUERY_FIXTURE_PLUGIN}', spec '{"other": {"x": 1}}');
+----
+<REGEX>:.*not a schema in the plugins option.*
+
+statement error
+ATTACH 'cloudquery' AS bad (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}', plugins 'fixture={CLOUDQUERY_FIXTURE_PLUGIN}', spec '{"fixture": {"item_count": "many"}}');
+----
+<REGEX>:.*rejected its spec.*
+
+statement error
+ATTACH 'cloudquery' AS bad (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}', plugins 'github:cloudquery/test');
+----
+<REGEX>:.*explicit @version.*
+
+# ------------------------------------------------------------------ attach
+
+# The same plugin twice (two schemas), one with a JSON spec and one with YAML.
+statement ok
+ATTACH 'cloudquery' AS cq (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}',
+    plugins 'fixture={CLOUDQUERY_FIXTURE_PLUGIN}, fx2={CLOUDQUERY_FIXTURE_PLUGIN}',
+    spec 'fixture:
+  item_count: 3000
+fx2:
+  greeting: hey');
+
+query TT
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'cq' AND schema_name <> 'main' ORDER BY ALL;
+----
+fixture	fixture_flaky
+fixture	fixture_item
+fixture	fixture_item_event
+fixture	fixture_whoami
+fx2	fixture_flaky
+fx2	fixture_item
+fx2	fixture_item_event
+fx2	fixture_whoami
+
+# CloudQuery's Arrow types, extension types included, map to DuckDB types.
+query TT
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'cq' AND schema_name = 'fixture' AND table_name = 'fixture_item' ORDER BY column_index;
+----
+_cq_id	UUID
+_cq_parent_id	UUID
+id	BIGINT
+name	VARCHAR
+category	VARCHAR
+price	DOUBLE
+in_stock	BOOLEAN
+created_at	TIMESTAMP WITH TIME ZONE
+item_uuid	UUID
+attributes	JSON
+ip	VARCHAR
+mac	VARCHAR
+tags	VARCHAR[]
+related_uuids	UUID[]
+
+query TT
+SELECT column_name, is_nullable FROM duckdb_columns() WHERE database_name = 'cq' AND schema_name = 'fixture' AND table_name = 'fixture_item' AND column_name IN ('_cq_id', 'id', 'name') ORDER BY column_index;
+----
+_cq_id	false
+id	false
+name	true
+
+query T
+SELECT comment FROM duckdb_tables() WHERE database_name = 'cq' AND schema_name = 'fixture' AND table_name = 'fixture_item_event';
+----
+Two events per item: a child relation of fixture_item. Child of fixture_item (join _cq_parent_id to its _cq_id).
+
+# ------------------------------------------------------------------- reads
+
+query II
+SELECT count(*), count(DISTINCT _cq_id) FROM cq.fixture.fixture_item;
+----
+3000	3000
 
 query TI
-SELECT category, count(*) FROM cloudquery.main.fetch_items('{CLOUDQUERY_MOCK_API}') GROUP BY category ORDER BY category;
+SELECT category, count(*) FROM cq.fx2.fixture_item GROUP BY ALL ORDER BY ALL;
 ----
 hardware	8
-service	8
+services	8
 software	9
 
-# The harness runs CLOUDQUERY_MOCK_API with MOCK_API_FLAKY=1: every page answers
-# 429 + Retry-After once, so every query above also exercised the retry path.
-
-# CLOUDQUERY_MOCK_API_AUTH requires a bearer token ('test-token'). Every language's
-# fetch_items must put the HTTP status code in its error message.
-statement error
-SELECT count(*) FROM cloudquery.main.fetch_items('{CLOUDQUERY_MOCK_API_AUTH}');
+query ITTRTTTTTTT
+SELECT id, name, category, price, in_stock, item_uuid::VARCHAR, attributes->>'color', ip, mac, tags::VARCHAR, related_uuids[1]::VARCHAR
+FROM cq.fixture.fixture_item WHERE id IN (1, 5) ORDER BY id;
 ----
-401
+1	item-001	software	1.5	false	8752c9ac-9d99-53dc-90cb-67551caf2d5c	green	10.0.0.1/32	02:00:00:00:00:01	[t1, all]	c1c41e2a-ad15-5464-9fe2-de9cf013afbd
+5	item-005	services	7.5	false	36aba075-5e62-5ca7-aa52-e106759d4fff	NULL	NULL	NULL	[t1, all]	NULL
 
-statement ok
-CREATE SECRET cloudquery_api_test (TYPE cloudquery_api, TOKEN 'test-token');
+query TTTT
+SELECT typeof(item_uuid), typeof(attributes), typeof(related_uuids), typeof(created_at) FROM cq.fixture.fixture_item LIMIT 1;
+----
+UUID	JSON	UUID[]	TIMESTAMP WITH TIME ZONE
+
+query II
+SELECT epoch(created_at)::BIGINT, (attributes->>'rank')::INTEGER FROM cq.fixture.fixture_item WHERE id = 2;
+----
+1704074400	2
+
+# Every fifth item has NULLs in the nullable extension columns.
+query IIII
+SELECT count(*) FILTER (attributes IS NULL), count(*) FILTER (ip IS NULL), count(*) FILTER (mac IS NULL), count(*) FILTER (related_uuids IS NULL) FROM cq.fixture.fixture_item;
+----
+600	600	600	600
+
+# WHERE filters are applied by DuckDB (CloudQuery plugins take no filters),
+# exactly, for every column type, in any session time zone.
+query I
+SELECT count(*) FROM cq.fixture.fixture_item WHERE category = 'software' AND price > 20 AND in_stock;
+----
+498
 
 query I
-SELECT count(*) FROM cloudquery.main.fetch_items('{CLOUDQUERY_MOCK_API_AUTH}', page_size := 25);
+SELECT count(*) FROM cq.fixture.fixture_item WHERE item_uuid = '8752c9ac-9d99-53dc-90cb-67551caf2d5c';
 ----
-25
+1
 
-# Several pages: the token must survive between batches (over HTTP each batch is a
-# separate request, so a token kept only in memory is lost after page 1).
 query I
-SELECT count(*) FROM cloudquery.main.fetch_items('{CLOUDQUERY_MOCK_API_AUTH}', page_size := 7);
+SELECT count(*) FROM cq.fixture.fixture_item WHERE created_at < TIMESTAMPTZ '2024-01-01 10:30:00+00' AND name LIKE 'item-00%';
 ----
-25
+9
 
 statement ok
-DROP SECRET cloudquery_api_test;
+SET TimeZone = 'America/New_York';
 
-# base_url must be http(s).
-statement error
-SELECT * FROM cloudquery.main.fetch_items('ftp://example.com');
+query I
+SELECT count(*) FROM cq.fixture.fixture_item WHERE created_at < TIMESTAMPTZ '2024-01-01 10:30:00+00' AND name LIKE 'item-00%';
 ----
-<REGEX>:.*
+9
 
-# page_size is a named argument constrained to [1, 1000].
-statement error
-SELECT * FROM cloudquery.main.fetch_items('{CLOUDQUERY_MOCK_API}', page_size := 0);
+statement ok
+SET TimeZone = 'UTC';
+
+# Projection: one column of a wide table.
+query I
+SELECT sum(id) FROM cq.fixture.fixture_item;
 ----
-<REGEX>:.*
+4501500
+
+# ---------------------------------------------------------- child relations
+
+query I
+SELECT count(*) FROM cq.fixture.fixture_item_event;
+----
+6000
+
+# A child's _cq_parent_id joins its parent's _cq_id: cq ids are deterministic,
+# so separate syncs of the parent and the child line up.
+query TI
+SELECT e.kind, count(*) FROM cq.fixture.fixture_item_event e JOIN cq.fixture.fixture_item i ON e._cq_parent_id = i._cq_id
+WHERE i.category = 'software' GROUP BY ALL ORDER BY ALL;
+----
+created	1000
+restocked	1000
+
+query I
+SELECT count(*) FROM cq.fixture.fixture_item_event e JOIN cq.fixture.fixture_item i ON e._cq_parent_id = i._cq_id AND e.item_id = i.id;
+----
+6000
+
+# ------------------------------------------------------------ limits
+
+query I
+SELECT count(*) FROM (SELECT id FROM cq.fixture.fixture_item LIMIT 7);
+----
+7
+
+# The plugin is usable again after a sync cut short by LIMIT.
+query I
+SELECT count(*) FROM cq.fixture.fixture_item;
+----
+3000
+
+query I
+SELECT count(*) FROM cq.main.scan('fixture', 'fixture_item', max_rows := 10);
+----
+10
+
+query I
+SELECT count(*) FROM cq.main.scan('fixture', 'fixture_item_event', max_rows := 2500);
+----
+2500
+
+# ------------------------------------------------------------ plugin errors
+
+# By default a table error is logged and the rows fetched so far are returned,
+# as the CloudQuery CLI does.
+query I
+SELECT sum(n) FROM cq.fixture.fixture_flaky;
+----
+6
 
 statement error
-SELECT * FROM cloudquery.main.fetch_items('{CLOUDQUERY_MOCK_API}', page_size := 5000);
+SELECT * FROM cq.main.scan('fixture', 'fixture_flaky', strict := true);
 ----
-<REGEX>:.*
+<REGEX>:.*upstream API returned 503.*
+
+statement error
+SELECT * FROM cq.main.scan('fixture', 'no_such_table');
+----
+<REGEX>:.*has no table "no_such_table".*
+
+statement error
+SELECT * FROM cq.main.scan('nope', 'fixture_item');
+----
+<REGEX>:.*no plugin schema "nope".*
+
+# ------------------------------------------------------------ secrets
+
+query TTI
+SELECT greeting, has_token, item_count FROM cq.fixture.fixture_whoami;
+----
+hello	false	3000
+
+query TTI
+SELECT greeting, has_token, item_count FROM cq.fx2.fixture_whoami;
+----
+hey	false	25
+
+statement ok
+CREATE SECRET cq_fixture (TYPE cloudquery, PLUGIN 'fixture', SPEC '{"token": "s3cret-token", "greeting": "Hi"}', SCOPE 'cloudquery://fixture');
+
+# The secret's spec is deep-merged over the ATTACH spec at query time.
+query TTI
+SELECT greeting, has_token, item_count FROM cq.fixture.fixture_whoami;
+----
+Hi	true	3000
+
+# A secret scoped to another schema does not reach it.
+query TTI
+SELECT greeting, has_token, item_count FROM cq.fx2.fixture_whoami;
+----
+hey	false	25
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE name = 'cq_fixture' AND secret_string LIKE '%s3cret-token%';
+----
+0
+
+# YAML works too, and a secret naming another plugin is ignored.
+statement ok
+CREATE SECRET cq_fx2 (TYPE cloudquery, PLUGIN 'fx2', SPEC 'token: t2', SCOPE 'cloudquery://fx2');
+
+query TT
+SELECT greeting, has_token FROM cq.fx2.fixture_whoami;
+----
+hey	true
+
+statement ok
+CREATE OR REPLACE SECRET cq_fx2 (TYPE cloudquery, PLUGIN 'someotherplugin', SPEC 'token: t2', SCOPE 'cloudquery://fx2');
+
+query TT
+SELECT greeting, has_token FROM cq.fx2.fixture_whoami;
+----
+hey	false
+
+statement ok
+CREATE OR REPLACE SECRET cq_fx2 (TYPE cloudquery, PLUGIN 'fx2', SPEC '[1, 2]', SCOPE 'cloudquery://fx2');
+
+statement error
+SELECT * FROM cq.fx2.fixture_whoami;
+----
+<REGEX>:.*must be an object.*
+
+statement ok
+DROP SECRET cq_fx2;
+
+statement ok
+DROP SECRET cq_fixture;
+
+# ------------------------------------------------------------ introspection
+
+query TTTTI
+SELECT schema_name, plugin, registry, plugin_version, table_count FROM cq.main.plugin ORDER BY schema_name;
+----
+fixture	fixture	local	v1.0.0	4
+fx2	fixture	local	v1.0.0	4
+
+query T
+SELECT spec_schema->>'$.properties.item_count.type' FROM cq.main.plugin WHERE schema_name = 'fixture';
+----
+integer
+
+query TTTTI
+SELECT table_name, parent_table, child_tables::VARCHAR, primary_key_columns::VARCHAR, column_count FROM cq.main.plugin_table WHERE schema_name = 'fixture' ORDER BY table_name;
+----
+fixture_flaky	NULL	[]	[_cq_id]	3
+fixture_item	NULL	[fixture_item_event]	[id]	14
+fixture_item_event	fixture_item	[]	[item_id, seq]	6
+fixture_whoami	NULL	[]	[_cq_id]	5
+
+query TTTTT
+SELECT column_name, cloudquery_type, duckdb_type, nullable, is_primary_key FROM cq.main.plugin_column
+WHERE schema_name = 'fixture' AND table_name = 'fixture_item' AND ordinal IN (1, 3, 9, 10, 11, 12, 14) ORDER BY ordinal;
+----
+_cq_id	uuid	UUID	false	false
+id	int64	BIGINT	false	true
+item_uuid	uuid	UUID	true	false
+attributes	json	JSON	true	false
+ip	inet	VARCHAR	true	false
+mac	mac	VARCHAR	true	false
+related_uuids	list<uuid>	UUID[]	true	false
+
+statement ok
+DETACH cq;

@@ -23,16 +23,23 @@ Faster loops while iterating: `make test-unit`, `make test-sql`, `make lint-expl
 ```
 cmd/vgi-cloudquery-worker/  # main.go: the worker binary (flags -> serve.Main)
 internal/cloudquery/
-  worker.go        # assembles the catalog; register new functions in NewWorker
-  meta.go          # catalog/schema metadata + helpers (objectTags, column)
-  greet.go         # scalar example (overloads, constant arg with choices)
-  sequence.go      # table function example (named args, streaming state)
-  fetch_items.go   # REST API table function (pagination, retries, secrets)
+  worker.go        # assembles the catalog (ATTACH handlers, scan, install_plugin, info tables)
+  meta.go          # metadata helpers (objectTags, column); docs.go / plugin_docs.go hold the text
+  plugin_ref.go    # parses the plugins option ([schema=]ref)
+  fetch.go         # Hub / GitHub downloads into the sha256-verified cache
+  host.go          # plugin processes: start, Init, GetTables, pooling (supervise.go: lifeline)
+  spec.go          # JSON/YAML plugin specs and the secret deep-merge
+  catalog.go       # per-ATTACH plugin schemas and tables
+  scan.go          # scan(): one Sync per query, Arrow batches projected and streamed
+  types.go         # CloudQuery Arrow/extension types -> DuckDB types
+  info.go          # main.plugin / plugin_table / plugin_column
+  install.go       # install_plugin(ref)
   version.go       # the worker version (checked against release tags)
   *_test.go        # go test unit tests
 internal/serve/    # --http / --unix / stdio and logging flags, shared with recipes
 test/sql/          # sqllogictest files run through DuckDB
-test/mock_api/     # offline mock of the REST API used by tests
+test/fixture-plugin/  # a CloudQuery source plugin (plugin-sdk v4) the tests host
+test/mock_registry/   # offline mock of the CloudQuery Hub API and GitHub releases
 examples/          # recipes (one package main, served by bin/recipes <name>)
 ci/                # integration harness used by `make test-sql` and CI
 scripts/           # vgi_template.py (init / template-diff)

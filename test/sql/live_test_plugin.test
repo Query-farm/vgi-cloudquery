@@ -1,0 +1,56 @@
+# name: test/sql/live_test_plugin.test
+# description: The published cloudquery/test plugin (v4.1.0, a GitHub release asset), fetched once and cached; skipped offline
+# group: [cloudquery]
+
+require vgi
+
+require-env CLOUDQUERY_WORKER
+
+require-env CLOUDQUERY_LIVE_GITHUB
+
+require-env CLOUDQUERY_LIVE_CACHE
+
+statement ok
+ATTACH 'cloudquery' AS live (TYPE vgi, LOCATION '{CLOUDQUERY_WORKER}',
+    plugins 'github:cloudquery/test@v4.1.0', spec '{"test": {"num_rows": 3}}', cache_dir '{CLOUDQUERY_LIVE_CACHE}');
+
+query TTTI
+SELECT schema_name, plugin, plugin_version, table_count FROM live.main.plugin;
+----
+test	test	4.1.0	4
+
+query I
+SELECT count(*) FROM live.test.test_some_table;
+----
+3
+
+query I
+SELECT count(*) FROM live.test.test_sub_table s JOIN live.test.test_some_table p ON s._cq_parent_id = p._cq_id;
+----
+30
+
+# The testdata table has a column of every Arrow type CloudQuery uses.
+query I
+SELECT count(*) FROM live.main.plugin_column WHERE table_name = 'test_testdata_table';
+----
+79
+
+query TTTTTTT
+SELECT typeof(uuid), typeof(json), typeof(inet), typeof(mac), typeof(uuid_list), typeof(decimal128), typeof(timestamp_ns) FROM live.test.test_testdata_table;
+----
+UUID	JSON	VARCHAR	VARCHAR	UUID[]	DECIMAL(19,10)	TIMESTAMPTZ_NS
+
+query TT
+SELECT inet, mac FROM live.test.test_testdata_table;
+----
+192.0.2.0/24	aa:bb:cc:dd:ee:ff
+
+# Paid tables need a CloudQuery API key: without one the plugin refuses, and
+# the worker never borrows a `cloudquery login` session from the user's files.
+statement error
+SELECT * FROM live.test.test_paid_table;
+----
+<REGEX>:.*cloudquery_hub.*
+
+statement ok
+DETACH live;

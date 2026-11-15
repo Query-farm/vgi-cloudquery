@@ -1,16 +1,34 @@
 # Private graders for the public vgi.agent_test_tasks in the worker's catalog metadata.
-# `vgi-lint lint --ai` runs an agent on each prompt and grades it with check_sql.
+# `vgi-lint lint --ai` runs an agent on each prompt and grades it with reference_sql.
 # See https://github.com/Query-farm/vgi-lint-check (VGI920).
+# The linter launches the worker with --plugins fixture=bin/cq-source-fixture
+# (vgi-lint.toml), so these answers are over the in-repo fixture plugin with its
+# default spec (25 items, greeting "hello").
 tasks:
-  - name: formal_greeting
-    reference_sql: SELECT cloudquery.main.greet('Grace', 'formal') AS greeting
-  - name: sum_of_squares
-    reference_sql: SELECT sum(squared) AS total FROM cloudquery.main.sequence_table(10)
-  - name: stepped_sequence
-    reference_sql: SELECT n FROM cloudquery.main.sequence_table(4, step := 5) ORDER BY n
-  # Reads the public demo API (https://vgi-starter-api.query-farm.services/v1).
-  - name: items_per_category
-    check_sql: >-
-      SELECT count(*) = 3 AND sum(items) = 25
-      FROM (SELECT category, count(*) AS items
-            FROM cloudquery.main.fetch_items('https://vgi-starter-api.query-farm.services/v1') GROUP BY category)
+  - name: attached_plugin_count
+    reference_sql: SELECT count(*) AS plugins FROM cloudquery.main.plugin
+  - name: child_relation
+    reference_sql: >-
+      SELECT table_name, parent_table FROM cloudquery.main.plugin_table
+      WHERE parent_table IS NOT NULL ORDER BY table_name
+  - name: uuid_columns
+    reference_sql: >-
+      SELECT column_name FROM cloudquery.main.plugin_column
+      WHERE table_name = 'fixture_item' AND duckdb_type = 'UUID' ORDER BY column_name
+  - name: items_by_category
+    reference_sql: SELECT category, count(*) AS items FROM cloudquery.fixture.fixture_item GROUP BY category ORDER BY category
+  - name: software_restocks
+    reference_sql: >-
+      SELECT count(*) AS restocks FROM cloudquery.fixture.fixture_item_event e
+      JOIN cloudquery.fixture.fixture_item i ON e._cq_parent_id = i._cq_id
+      WHERE i.category = 'software' AND e.kind = 'restocked'
+  - name: fixture_greeting
+    reference_sql: SELECT greeting FROM cloudquery.fixture.fixture_whoami
+  - name: flaky_rows
+    reference_sql: SELECT count(*) AS rows_returned FROM cloudquery.fixture.fixture_flaky
+  - name: capped_scan
+    reference_sql: SELECT count(*) AS rows_returned FROM cloudquery.main.scan('fixture', 'fixture_item', max_rows := 5)
+  # Downloads the published plugin from GitHub once (vgi-lint.toml points the
+  # linter's worker at .tools/plugin-cache, where the SQL tests cache it too).
+  - name: install_test_plugin
+    reference_sql: SELECT registry, plugin_version FROM cloudquery.main.install_plugin('github:cloudquery/test@v4.1.0')

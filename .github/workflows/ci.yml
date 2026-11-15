@@ -61,11 +61,12 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
-      - name: Build the worker and the recipes
+      - name: Build the worker, the recipes and the fixture plugin
         run: |
           exe=""; [ "$RUNNER_OS" = "Windows" ] && exe=.exe
           go build -o "bin/vgi-cloudquery-worker$exe" ./cmd/vgi-cloudquery-worker
           go build -o "bin/recipes$exe" ./examples
+          (cd test/fixture-plugin && go build -o "../../bin/cq-source-fixture$exe" .)
       - name: Install the SQL test runner
         run: |
           uv venv .tools
@@ -77,6 +78,7 @@ jobs:
           export WORKER="$PWD/bin/vgi-cloudquery-worker$exe"
           export HAYBARN_UNITTEST="$tools/haybarn-unittest$exe"
           export RECIPES_WORKER="$PWD/bin/recipes$exe"
+          export FIXTURE_PLUGIN="$PWD/bin/cq-source-fixture$exe"
           TRANSPORT=${{ matrix.transport }} PYTHON="uv run --no-project python" ci/run-integration.sh
 
   metadata:
@@ -88,15 +90,18 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go build -o bin/vgi-cloudquery-worker ./cmd/vgi-cloudquery-worker
+      - run: cd test/fixture-plugin && go build -o ../../bin/cq-source-fixture .
       - name: Read fail_on from vgi-lint.toml
         id: lintcfg
         run: python3 -c 'import tomllib; print("fail_on=" + tomllib.load(open("vgi-lint.toml", "rb")).get("fail_on", "error"))' >> "$GITHUB_OUTPUT"
       - uses: Query-farm/vgi-lint-check@v2
         with:
-          location: ${{ github.workspace }}/bin/vgi-cloudquery-worker
+          # The worker hosts the in-repo fixture plugin for ATTACHes that name no plugins
+          # (vgi-lint passes no ATTACH options), so every example runs offline.
+          location: ${{ github.workspace }}/bin/vgi-cloudquery-worker --plugins fixture=${{ github.workspace }}/bin/cq-source-fixture --cache-dir ${{ github.workspace }}/.tools/plugin-cache
           # Set in vgi-lint.toml, so local runs and CI agree.
           fail-on: ${{ steps.lintcfg.outputs.fail_on }}
-          # Set to false if your examples need real credentials or network access.
+          # Examples run against the fixture plugin: no credentials or network needed.
           execute: true
 
   docker:
