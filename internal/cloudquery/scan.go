@@ -481,6 +481,11 @@ func openScanStream(ctx context.Context, params *vgi.ProcessParams, state *ScanS
 	go func() {
 		defer close(s.ch)
 		mem := memory.NewGoAllocator()
+		// A sync we cancel part way (LIMIT, max_rows, an abandoned scan) can
+		// leave the plugin wedged: plugin-sdk's Sync handler stops reading
+		// once the stream is cancelled, and a batch already on its way to it
+		// blocks the plugin's sync, and its one-sync-at-a-time lock, forever.
+		// Such a process is discarded rather than pooled.
 		healthy := true
 		defer func() {
 			if healthy {
@@ -490,7 +495,7 @@ func openScanStream(ctx context.Context, params *vgi.ProcessParams, state *ScanS
 			}
 		}()
 		// plugin-sdk serves one sync at a time and releases its lock a moment
-		// after a cancelled stream ends, so a busy answer is retried.
+		// after a stream ends, so a busy answer is retried.
 		var stream pb.Plugin_SyncClient
 		var resp *pb.Sync_Response
 		err := retryInUse(syncCtx, func() error {
@@ -507,7 +512,8 @@ func openScanStream(ctx context.Context, params *vgi.ProcessParams, state *ScanS
 					return
 				}
 				if syncCtx.Err() != nil {
-					return // cancelled by us: the plugin stays usable
+					healthy = false // cancelled by us: the plugin may be wedged
+					return
 				}
 				if status.Code(err) == codes.Unavailable {
 					healthy = false
@@ -525,6 +531,7 @@ func openScanStream(ctx context.Context, params *vgi.ProcessParams, state *ScanS
 				rec, err := pb.NewRecordFromBytes(m.Insert.GetRecord())
 				if err != nil {
 					send(batchOrErr{err: fmt.Errorf("%s: decoding a record batch: %w", label, err)})
+					healthy = false // the sync is still running: do not reuse the plugin
 					return
 				}
 				if rec == nil {
@@ -538,15 +545,18 @@ func openScanStream(ctx context.Context, params *vgi.ProcessParams, state *ScanS
 				rec.Release()
 				if err != nil {
 					send(batchOrErr{err: fmt.Errorf("%s: %w", label, err)})
+					healthy = false // the sync is still running: do not reuse the plugin
 					return
 				}
 				if !send(batchOrErr{batch: out}) {
+					healthy = false // stopped by the reader: the plugin may be wedged
 					return
 				}
 			case *pb.Sync_Response_Error:
 				msg := fmt.Sprintf("plugin error syncing %s: %s", m.Error.GetTableName(), m.Error.GetError())
 				if strict {
 					send(batchOrErr{err: fmt.Errorf("%s: %s", label, msg)})
+					healthy = false // the sync is still running: do not reuse the plugin
 					return
 				}
 				slog.Warn(msg, "scan", label)

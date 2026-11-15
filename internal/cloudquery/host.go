@@ -15,8 +15,9 @@
 // A plugin serves one Sync at a time (plugin-sdk refuses a second with
 // "plugin already in use"), so a process is leased exclusively for the
 // length of a call. Processes are pooled per (plugin, schema, spec, env),
-// stopped after sitting idle, when the pool is full, or when the worker
-// exits. Plugin log lines go to the worker's stderr, never its stdout.
+// stopped after sitting idle, when the pool is full, when a sync on them was
+// cancelled part way (plugin-sdk can stay locked after that), or when the
+// worker exits. Plugin log lines go to the worker's stderr, never its stdout.
 
 package cloudquery
 
