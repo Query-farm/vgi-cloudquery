@@ -61,8 +61,9 @@ const catalogDocLLM = "This worker hosts CloudQuery source plugins (the cloudque
 	"cloudquery://<schema>; it is deep-merged over the ATTACH spec at query time. Every query runs a plugin sync of just that table, so it " +
 	"costs the same API calls as a CloudQuery sync of the table: CloudQuery plugins accept no per-query filters, and WHERE clauses are " +
 	"applied by DuckDB afterwards. Only the selected columns are returned, LIMIT stops the sync early, and scan(schema, table_name, " +
-	"max_rows := N) caps the rows fetched. The main schema's plugin, plugin_table and plugin_column tables describe what is attached; " +
-	"install_plugin(ref) downloads a Hub plugin using an API key held in a cloudquery_hub secret. Replace cloudquery with the ATTACH alias."
+	"max_rows := N) caps the rows fetched. The main schema introspects what is attached (resolved plugins, tables, relations, " +
+	"column type mappings) and can pre-install Hub plugins using an API key held in a cloudquery_hub secret. Replace cloudquery with " +
+	"the ATTACH alias."
 
 // CatalogDocMD is the catalog's long human-facing description.
 const CatalogDocMD = "# CloudQuery source plugins in DuckDB\n\n" +
@@ -76,18 +77,25 @@ const CatalogDocMD = "# CloudQuery source plugins in DuckDB\n\n" +
 	"their types.\n" +
 	"- **Pushdown**: table selection and projection; CloudQuery plugins take no filters, so WHERE runs in DuckDB, and LIMIT cancels the sync.\n"
 
-const schemaDocLLM = "The main schema describes and reads the plugins of the current ATTACH; the plugin tables themselves live in one " +
-	"schema per plugin. plugin lists what the plugins option resolved to (versions, verified sha256 digests, spec JSON Schema), " +
-	"plugin_table lists every table with its parent relation and primary key, and plugin_column every column with its CloudQuery and " +
-	"DuckDB types. scan(schema, table_name, max_rows := 0, strict := false) reads a plugin table directly. install_plugin(ref) downloads " +
-	"a plugin into the cache. Everything here reflects the current ATTACH, and is empty when it named no plugins."
+const schemaDocLLM = "The main schema introspects and reads the plugins of the current ATTACH; the plugin tables themselves live " +
+	"in one schema per plugin. Its tables report what the plugins option resolved to (versions, verified sha256 digests, spec " +
+	"JSON Schema), every plugin table with its parent relation and primary key, and every column with its CloudQuery and DuckDB " +
+	"types. scan(schema, table_name, max_rows := 0, strict := false) reads a plugin table directly, which is the way in when a " +
+	"table needs credentials only a secret holds; a plugin can also be downloaded into the cache ahead of use. Everything here " +
+	"reflects the current ATTACH and is empty when it named no plugins."
+
+// SchemaComment is the main schema's one-line comment.
+const SchemaComment = "Introspection of the CloudQuery plugins this ATTACH hosts, plus direct scans and plugin installs."
 
 // SchemaDocMD is the main schema's human-facing description.
 const SchemaDocMD = "## main\n\n" +
-	"Introspection of the plugins this ATTACH hosts: what the `plugins` option resolved to, which tables exist and how they relate, and " +
-	"how each CloudQuery column type maps to DuckDB.\n\n" +
-	"The plugin tables themselves live in one schema per plugin. When a plugin's tables depend on credentials that only a secret " +
-	"holds, read them with `scan` instead."
+	"Introspection of the plugins this ATTACH hosts: what the `plugins` option resolved to (version, source, verified sha256 " +
+	"digest, spec JSON Schema), which tables exist and how child relations hang off their parents (`_cq_parent_id` to " +
+	"`_cq_id`), and how each CloudQuery column type maps to DuckDB (`UUID` and `JSON` keep their types).\n\n" +
+	"The plugin tables themselves live in one schema per plugin. Every read runs a plugin sync of just that table: plugins take " +
+	"no filters, so `WHERE` runs in DuckDB, while projection is pushed down and `LIMIT` stops the sync early. When a plugin's " +
+	"tables depend on credentials that only a `cloudquery` secret holds, read them with `scan` instead. Everything here is " +
+	"empty when the ATTACH named no plugins."
 
 type agentTask struct {
 	Name   string `json:"name"`
