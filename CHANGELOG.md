@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5 (2026-11-17)
+
+- Actually publish the test fixture plugin: 0.1.4's fixture job was skipped because CI had already passed on the commit.
+
 ## 0.1.4 (2026-11-17)
 
 - Releases also publish the test fixture plugin (`cq-source-fixture-<os>_<arch>`), so catalog harvests can run the executable examples the way CI does.

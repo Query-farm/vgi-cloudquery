@@ -19,7 +19,7 @@ Apache Arrow) itself, and streams the plugin's record batches into DuckDB. There
 CloudQuery CLI and no destination database.
 
 ```sql
-ATTACH 'cloudquery' AS cq (TYPE vgi, LOCATION 'github-auto://Query-farm/vgi-cloudquery@v0.1.4',
+ATTACH 'cloudquery' AS cq (TYPE vgi, LOCATION 'github-auto://Query-farm/vgi-cloudquery@v0.1.5',
     plugins 'github:cloudquery/test@v4.1.0, crowdstrike=github:justmiles/crowdstrike@v2.1.0',
     spec    '{"test": {"num_rows": 3}}');
 
@@ -41,13 +41,13 @@ GROUP BY ALL;
 
 Download the release archive for your platform from the
 [releases page](https://github.com/Query-farm/vgi-cloudquery/releases), or let the VGI
-extension fetch it with `github-auto://` (change `@v0.1.4` to the release you want):
+extension fetch it with `github-auto://` (change `@v0.1.5` to the release you want):
 
 ```sql
 INSTALL vgi FROM community;
 LOAD vgi;
 
-ATTACH 'cloudquery' AS cq (TYPE vgi, LOCATION 'github-auto://Query-farm/vgi-cloudquery@v0.1.4',
+ATTACH 'cloudquery' AS cq (TYPE vgi, LOCATION 'github-auto://Query-farm/vgi-cloudquery@v0.1.5',
     plugins 'github:cloudquery/test@v4.1.0');
 
 FROM cq.main.plugin;          -- what was attached
