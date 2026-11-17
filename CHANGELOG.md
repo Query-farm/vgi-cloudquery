@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4 (2026-11-17)
+
+- Releases also publish the test fixture plugin (`cq-source-fixture-<os>_<arch>`), so catalog harvests can run the executable examples the way CI does.
+
 ## 0.1.3 (2026-11-16)
 
 - CI tooling (haybarn-unittest, lint helpers) runs on Python 3.14.
