@@ -5,8 +5,8 @@ go 1.26.5
 replace github.com/google/flatbuffers => github.com/rustyconover/flatbuffers v25.12.20-0.20261026151427-0acd09bcd1ff+incompatible
 
 require (
-	github.com/Query-farm/vgi-go v0.42.2
-	github.com/Query-farm/vgi-rpc-go v0.37.0
+	github.com/Query-farm/vgi-go v0.44.1
+	github.com/Query-farm/vgi-rpc-go v0.38.1
 	github.com/apache/arrow-go/v18 v18.7.0
 	github.com/cloudquery/plugin-pb-go v1.27.22
 	google.golang.org/grpc v1.83.2
@@ -15,10 +15,14 @@ require (
 )
 
 require (
+	github.com/MicahParks/jwkset v0.11.3 // indirect
+	github.com/MicahParks/keyfunc/v3 v3.8.1 // indirect
+	github.com/Query-farm/vgi-rpc-go/vgirpc/jwtauth v0.17.1 // indirect
 	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/apache/thrift v0.24.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
+	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.19.2 // indirect
@@ -35,6 +39,7 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 	modernc.org/libc v1.75.3 // indirect
